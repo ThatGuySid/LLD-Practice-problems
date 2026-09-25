@@ -178,8 +178,4 @@ npm run build
 - **No side-by-side attempt comparison.** Attempt history lists past attempts, but there's no diff/comparison view between two attempts at the same problem yet.
 - **Test environment caveat:** the automated tests in this repository run against an in-memory fake database (`server/tests/support/fakeDb.js`), not a live PostgreSQL instance. Run `npm test` with a real `DATABASE_URL` configured to exercise the real driver end to end before relying on this in a non-prototype setting.
 
-## How AI was used
 
-I used AI as a second opinion during the harder design decisions, debugging, and code review — not as the source of the product direction. The research direction, the MVP scope, and the final call on every design decision below were mine; where a suggestion changed my approach, or where I rejected one, that's recorded in `AI_USAGE.md` with the reasoning. A few examples: I turned down a suggestion for a numeric overall score in favor of the qualitative rubric described above, and turned down a general-purpose in-memory SQL engine for testing the concurrency fix in favor of a small fake driver scoped to the queries this service actually issues.
-
-The research/design notes are intentionally written to explain the engineering trade-offs that the prototype demonstrates rather than pretending the MVP is a production LMS.
