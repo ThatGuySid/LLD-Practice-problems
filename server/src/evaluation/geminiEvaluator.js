@@ -33,7 +33,7 @@ export class GeminiEvaluator extends Evaluator {
         contents: [{ parts: [{ text: prompt }] }],
         generationConfig,
       }),
-      signal: AbortSignal.timeout(200_000),
+      signal: AbortSignal.timeout(45_000),
     });
 
     const body = await response.text();

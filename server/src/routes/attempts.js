@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { query, withTransaction } from '../db/pool.js';
 import { runCommonMistakeCheck } from '../evaluation/commonMistakes.js';
+import { SubmissionContent } from '../domain/submissionContent.js';
 
 export const attemptsRouter = Router();
 
@@ -69,19 +70,21 @@ attemptsRouter.patch('/:id/draft', async (req, res, next) => {
   try {
     const id = learnerId(req);
     if (!id) return res.status(400).json({ error: 'A valid learner ID is required.' });
-    const textContent = String(req.body.textContent ?? '');
-    const diagram = req.body.diagram && typeof req.body.diagram === 'object'
-      ? req.body.diagram
-      : { nodes: [], edges: [] };
+    const content = new SubmissionContent(req.body || {});
 
     const { rows } = await withTransaction(async (client) => {
       const attempt = await client.query(
-        `SELECT a.id, a.status, p.slug FROM attempts a JOIN problems p ON p.id=a.problem_id WHERE a.id=$1 AND a.learner_id=$2 FOR UPDATE`,
+        `SELECT a.id, a.status, p.slug FROM attempts a JOIN problems p ON p.id=a.problem_id WHERE a.id=$1 AND a.learner_id=$2 FOR UPDATE OF a`,
         [req.params.id, id],
       );
       if (!attempt.rows[0]) throw Object.assign(new Error('Attempt not found.'), { statusCode: 404 });
       if (attempt.rows[0].status !== 'draft') throw Object.assign(new Error('Only draft attempts can be edited.'), { statusCode: 409 });
-      const precheck = runCommonMistakeCheck({ problemSlug: attempt.rows[0].slug, text: textContent, diagram });
+      const precheck = runCommonMistakeCheck({
+        problemSlug: attempt.rows[0].slug,
+        text: content.textContent,
+        diagram: content.diagram,
+        diagramText: content.serializeDiagram(),
+      });
       const result = await client.query(
         `INSERT INTO submissions(attempt_id, text_content, diagram_json, serialized_diagram, detected_code)
          VALUES($1,$2,$3::jsonb,$4,$5)
@@ -92,7 +95,7 @@ attemptsRouter.patch('/:id/draft', async (req, res, next) => {
            detected_code=EXCLUDED.detected_code,
            updated_at=NOW()
          RETURNING id, text_content, diagram_json, serialized_diagram, detected_code, updated_at`,
-        [req.params.id, textContent, JSON.stringify(diagram), serializeDiagram(diagram), precheck.detectedCode],
+        [req.params.id, content.textContent, JSON.stringify(content.diagram), content.serializeDiagram(), precheck.detectedCode],
       );
       await client.query('UPDATE attempts SET updated_at=NOW() WHERE id=$1', [req.params.id]);
       return { rows: [{ submission: result.rows[0] }] };
@@ -100,18 +103,3 @@ attemptsRouter.patch('/:id/draft', async (req, res, next) => {
     res.json(rows[0]);
   } catch (error) { next(error); }
 });
-
-function serializeDiagram(diagram) {
-  const nodes = Array.isArray(diagram?.nodes) ? diagram.nodes : [];
-  const edges = Array.isArray(diagram?.edges) ? diagram.edges : [];
-  const names = new Map(nodes.map((node) => [node.id, String(node?.data?.label || node?.id || 'Unnamed')]));
-  const lines = nodes.map((node) => {
-    const label = String(node?.data?.label || node?.id || 'Unnamed').trim();
-    const details = String(node?.data?.details || '').trim();
-    return `${label}${details ? ` — ${details}` : ''}`;
-  });
-  for (const edge of edges) {
-    lines.push(`${names.get(edge.source) || edge.source} --${edge.label ? ` [${edge.label}]` : ''}→ ${names.get(edge.target) || edge.target}`);
-  }
-  return lines.join('\n');
-}

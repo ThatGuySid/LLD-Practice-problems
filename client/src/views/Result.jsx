@@ -13,11 +13,17 @@ const criterionMeta = {
   explanation: 'Explanation quality',
 };
 
-export default function Result({ attempt, onBackToProblems, onHistory, onRetry }) {
+export default function Result({ attempt, onBackToProblems, onHistory, onRetry, onRerun }) {
   const result = attempt?.result_json;
   if (!result) {
+    // A failure with an error_message means the evaluator itself failed
+    // (e.g. Gemini was unavailable) — the original submission is fine, so it
+    // can be re-run in place. A failure with no error_message was stopped by
+    // the deterministic precheck before evaluation ran, so the content
+    // itself needs to change; only "start a new attempt" applies there.
+    const canRerun = attempt?.status === 'failed' && Boolean(attempt.error_message) && Boolean(onRerun);
     return (
-      <main className="shell narrow-shell page-pad"><div className="result-state"><StatusPill status={attempt?.status} /><h1>{attempt?.status === 'failed' ? 'Evaluation failed' : 'Evaluation in progress'}</h1><p>{attempt?.status === 'failed' ? (attempt.error_message || 'The evaluator returned an error. You can retry with a new attempt.') : 'The evaluation worker is still running. This page will update automatically.'}</p><button className="button secondary" onClick={onHistory}>Go to attempt history</button></div></main>
+      <main className="shell narrow-shell page-pad"><div className="result-state"><StatusPill status={attempt?.status} /><h1>{attempt?.status === 'failed' ? 'Evaluation failed' : 'Evaluation in progress'}</h1><p>{attempt?.status === 'failed' ? (attempt.error_message || 'This submission did not pass the precheck. Start a new attempt to fix it.') : 'The evaluation worker is still running. This page will update automatically.'}</p><div className="result-state-actions">{canRerun ? <button className="button primary" onClick={onRerun}>Re-run evaluation →</button> : null}<button className="button secondary" onClick={onHistory}>Go to attempt history</button></div></div></main>
     );
   }
 

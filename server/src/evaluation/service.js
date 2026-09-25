@@ -1,32 +1,43 @@
-import { withTransaction, query } from '../db/pool.js';
 import { runCommonMistakeCheck } from './commonMistakes.js';
+import { Attempt } from '../domain/attempt.js';
+import { SubmissionContent } from '../domain/submissionContent.js';
 
 export class EvaluationService {
-  constructor({ evaluator }) {
+  // `query`/`withTransaction` are injected (rather than importing db/pool.js
+  // directly) so this class can be unit-tested against an in-memory fake
+  // driver without a real PostgreSQL connection. src/index.js wires the real
+  // pg-backed pool in.
+  constructor({ evaluator, query, withTransaction }) {
+    if (!query || !withTransaction) {
+      throw new Error('EvaluationService requires query and withTransaction.');
+    }
     this.evaluator = evaluator;
+    this.query = query;
+    this.withTransaction = withTransaction;
   }
 
   async submitAttempt(attemptId, payload) {
-    const result = await withTransaction(async (client) => {
+    const result = await this.withTransaction(async (client) => {
       const attemptResult = await client.query(
         `SELECT a.*, p.slug, p.title, p.summary, p.prompt, p.requirements
          FROM attempts a
          JOIN problems p ON p.id = a.problem_id
          WHERE a.id = $1
-         FOR UPDATE`,
+         FOR UPDATE OF a`,
         [attemptId],
       );
       const attempt = attemptResult.rows[0];
       if (!attempt) throw Object.assign(new Error('Attempt not found.'), { statusCode: 404 });
-      if (attempt.status !== 'draft') {
-        throw Object.assign(new Error('This attempt is no longer editable.'), { statusCode: 409 });
-      }
 
-      const textContent = String(payload.textContent ?? '');
-      const diagram = payload.diagram && typeof payload.diagram === 'object'
-        ? payload.diagram
-        : { nodes: [], edges: [] };
-      const precheck = runCommonMistakeCheck({ problemSlug: attempt.slug, text: textContent, diagram });
+      const content = new SubmissionContent(payload);
+      const precheck = runCommonMistakeCheck({
+        problemSlug: attempt.slug,
+        text: content.textContent,
+        diagram: content.diagram,
+        diagramText: content.serializeDiagram(),
+      });
+      const nextStatus = precheck.hardFailures.length ? 'failed' : 'submitted';
+      new Attempt(attempt.status).assertTransition(nextStatus);
 
       await client.query(
         `INSERT INTO submissions(attempt_id, text_content, diagram_json, serialized_diagram, detected_code)
@@ -37,7 +48,7 @@ export class EvaluationService {
            serialized_diagram = EXCLUDED.serialized_diagram,
            detected_code = EXCLUDED.detected_code,
            updated_at = NOW()`,
-        [attemptId, textContent, JSON.stringify(diagram), serializeDiagram(diagram), precheck.detectedCode],
+        [attemptId, content.textContent, JSON.stringify(content.diagram), content.serializeDiagram(), precheck.detectedCode],
       );
 
       const submission = await client.query('SELECT id FROM submissions WHERE attempt_id = $1', [attemptId]);
@@ -52,12 +63,12 @@ export class EvaluationService {
            result_json = NULL,
            error_message = NULL,
            updated_at = NOW()`,
-        [submissionId, precheck.hardFailures.length ? 'failed' : 'pending', JSON.stringify(precheck)],
+        [submissionId, nextStatus === 'failed' ? 'failed' : 'pending', JSON.stringify(precheck)],
       );
 
       await client.query(
         `UPDATE attempts SET status = $2, submitted_at = NOW(), updated_at = NOW() WHERE id = $1`,
-        [attemptId, precheck.hardFailures.length ? 'failed' : 'submitted'],
+        [attemptId, nextStatus],
       );
 
       return { attempt, submissionId, precheck };
@@ -72,6 +83,56 @@ export class EvaluationService {
     return result;
   }
 
+  // Re-run an evaluation that previously failed (evaluator error, e.g. Gemini
+  // outage) without creating a new attempt/submission. The original
+  // submission text/diagram is untouched; only the evaluation record resets.
+  async rerunFailedEvaluation(attemptId) {
+    const claim = await this.withTransaction(async (client) => {
+      const result = await client.query(
+        `SELECT e.id evaluation_id, e.status evaluation_status, e.error_message, s.id submission_id, a.status attempt_status
+         FROM attempts a
+         JOIN submissions s ON s.attempt_id = a.id
+         JOIN evaluations e ON e.submission_id = s.id
+         WHERE a.id = $1
+         FOR UPDATE OF e`,
+        [attemptId],
+      );
+      const row = result.rows[0];
+      if (!row) throw Object.assign(new Error('Attempt has no submission to re-run.'), { statusCode: 404 });
+      if (row.evaluation_status !== 'failed') {
+        throw Object.assign(new Error('Only a failed evaluation can be re-run.'), { statusCode: 409 });
+      }
+      // A failure with no error_message never reached the evaluator — it was
+      // stopped by a hard precheck failure (e.g. empty submission). The
+      // submission content itself needs to change, so re-running the same
+      // evaluator call would just waste a call; the learner should edit and
+      // start a fresh attempt instead.
+      if (!row.error_message) {
+        throw Object.assign(
+          new Error('This submission failed a precheck before evaluation ran. Start a new attempt instead of re-running.'),
+          { statusCode: 409 },
+        );
+      }
+      new Attempt(row.attempt_status).assertTransition('submitted');
+
+      await client.query(
+        `UPDATE evaluations SET status='pending', error_message=NULL, result_json=NULL, updated_at=NOW() WHERE id=$1`,
+        [row.evaluation_id],
+      );
+      await client.query(
+        `UPDATE attempts SET status='submitted', updated_at=NOW() WHERE id=$1`,
+        [attemptId],
+      );
+      return { submissionId: row.submission_id };
+    });
+
+    queueMicrotask(() => this.processPendingEvaluation(claim.submissionId).catch((error) => {
+      console.error('Rerun evaluation failed:', error.message);
+    }));
+
+    return claim;
+  }
+
   async processPendingEvaluation(submissionId) {
     const claimed = await this.claimEvaluation(submissionId);
     if (!claimed) return false;
@@ -83,7 +144,7 @@ export class EvaluationService {
         precheck: claimed.precheck,
       });
 
-      await withTransaction(async (client) => {
+      await this.withTransaction(async (client) => {
         await client.query(
           `UPDATE evaluations
            SET status = 'completed', result_json = $2::jsonb, completed_at = NOW(), updated_at = NOW()
@@ -107,7 +168,7 @@ export class EvaluationService {
       });
       return true;
     } catch (error) {
-      await withTransaction(async (client) => {
+      await this.withTransaction(async (client) => {
         await client.query(
           `UPDATE evaluations SET status='failed', error_message=$2, updated_at=NOW() WHERE id=$1`,
           [claimed.evaluationId, error.message.slice(0, 1000)],
@@ -123,20 +184,32 @@ export class EvaluationService {
   }
 
   async claimEvaluation(submissionId) {
-    return withTransaction(async (client) => {
+    return this.withTransaction(async (client) => {
+      // `FOR UPDATE OF e` scopes the row lock (and SKIP LOCKED's skip check)
+      // to the evaluations row alone. Without "OF e", Postgres locks every
+      // row contributed by the join — including the shared `problems` row —
+      // so two learners submitting the same problem concurrently could have
+      // one claim spuriously skipped (and left "pending" forever) purely
+      // because an unrelated evaluation's transaction happened to be
+      // touching the same problem row. Scoping to `e` also means a duplicate
+      // claim attempt for the *same* submission (a double-click, or a rerun
+      // racing an in-flight background job) is skipped instead of blocking.
       const result = await client.query(
-        `SELECT e.id evaluation_id, e.precheck_json, s.text_content, s.serialized_diagram, s.detected_code,
+        `SELECT e.id evaluation_id, e.precheck_json, a.status attempt_status,
+                s.text_content, s.serialized_diagram, s.detected_code,
                 p.title, p.summary, p.prompt, p.requirements, p.slug
          FROM evaluations e
          JOIN submissions s ON s.id = e.submission_id
          JOIN attempts a ON a.id = s.attempt_id
          JOIN problems p ON p.id = a.problem_id
          WHERE e.submission_id = $1 AND e.status = 'pending'
-         FOR UPDATE SKIP LOCKED`,
+         FOR UPDATE OF e SKIP LOCKED`,
         [submissionId],
       );
       const row = result.rows[0];
       if (!row) return null;
+
+      new Attempt(row.attempt_status).assertTransition('evaluating');
 
       await client.query(
         `UPDATE evaluations
@@ -169,41 +242,38 @@ export class EvaluationService {
     });
   }
 
-  async recoverStuckEvaluations(maxAgeMinutes = 5) {
-    const { rows } = await query(
+  // Runs at server startup. Two kinds of evaluation can be stranded by a
+  // process restart or crash, since the in-process queueMicrotask() that
+  // normally drives evaluation forward does not survive a restart:
+  //   - "evaluating" jobs whose worker died mid-flight (locked_at is stale).
+  //   - "pending" jobs that were inserted but never got their microtask
+  //     scheduled/run before the process went away (or were starved by the
+  //     claim-locking bug fixed above).
+  // Both are simply requeued through the normal claim/process pipeline.
+  async recoverStuckEvaluations(maxEvaluatingAgeMinutes = 5) {
+    const stale = await this.query(
       `UPDATE evaluations
        SET status='pending', locked_at=NULL, updated_at=NOW()
        WHERE status='evaluating' AND locked_at < NOW() - ($1 || ' minutes')::interval
        RETURNING submission_id`,
-      [maxAgeMinutes],
+      [maxEvaluatingAgeMinutes],
     );
-    for (const row of rows) {
-      await query(
+    for (const row of stale.rows) {
+      await this.query(
         `UPDATE attempts a SET status='submitted', updated_at=NOW()
          FROM submissions s WHERE s.attempt_id=a.id AND s.id=$1`,
         [row.submission_id],
       );
-      this.processPendingEvaluation(row.submission_id).catch((error) => console.error('Recovery evaluation failed:', error.message));
     }
-    return rows.length;
-  }
-}
 
-export function serializeDiagram(diagram) {
-  const nodes = Array.isArray(diagram?.nodes) ? diagram.nodes : [];
-  const edges = Array.isArray(diagram?.edges) ? diagram.edges : [];
-  const lines = [];
-  for (const node of nodes) {
-    const label = String(node?.data?.label || node?.data?.title || node?.id || 'Unnamed node').trim();
-    const details = String(node?.data?.details || '').trim();
-    lines.push(`${label}${details ? ` — ${details}` : ''}`);
+    const orphanedPending = await this.query(
+      `SELECT submission_id FROM evaluations WHERE status='pending'`,
+    );
+
+    const submissionIds = new Set([...stale.rows, ...orphanedPending.rows].map((row) => row.submission_id));
+    for (const submissionId of submissionIds) {
+      this.processPendingEvaluation(submissionId).catch((error) => console.error('Recovery evaluation failed:', error.message));
+    }
+    return submissionIds.size;
   }
-  const lookup = new Map(nodes.map((node) => [node.id, String(node?.data?.label || node?.data?.title || node?.id || 'Unknown')]));
-  for (const edge of edges) {
-    const source = lookup.get(edge.source) || edge.source;
-    const target = lookup.get(edge.target) || edge.target;
-    const label = edge?.label ? ` [${edge.label}]` : '';
-    lines.push(`${source} --${label}→ ${target}`);
-  }
-  return lines.join('\n');
 }

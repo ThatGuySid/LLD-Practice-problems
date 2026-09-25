@@ -15,6 +15,44 @@ test('returns non-fatal hints for a thin parking-lot submission', () => {
   assert.ok(result.hints.length > 0);
 });
 
+test('diagram-aware precheck: a diagram-only submission does not get false MISSING_CLASS hints', () => {
+  // No explanation text at all — everything lives in the diagram, serialized
+  // the same way SubmissionContent would.
+  const diagramText = [
+    'Vehicle — has a license plate',
+    'ParkingSpot — sized for a vehicle type',
+    'Ticket — issued at entry',
+    'Vehicle --[parks in]→ ParkingSpot',
+    'Ticket --[charges a]→ Fee',
+  ].join('\n');
+
+  const result = runCommonMistakeCheck({
+    problemSlug: 'parking-lot',
+    text: 'Diagram only, see attached class diagram for the design.',
+    diagram: { nodes: [{ id: 'n1' }, { id: 'n2' }, { id: 'n3' }], edges: [{ source: 'n1', target: 'n2' }] },
+    diagramText,
+  });
+
+  const missingCodes = result.hints.map((hint) => hint.code);
+  assert.ok(!missingCodes.includes('MISSING_VEHICLE'), 'vehicle is present in the diagram');
+  assert.ok(!missingCodes.includes('MISSING_PARKING-SPOT'), 'parking spot is present in the diagram');
+  assert.ok(!missingCodes.includes('MISSING_TICKET'), 'ticket is present in the diagram');
+  assert.ok(!missingCodes.includes('MISSING_PRICING'), 'fee/pricing is present in the diagram');
+});
+
+test('diagram-aware precheck: without diagramText, diagram-only evidence is still invisible to class checks', () => {
+  // Documents the previous (buggy) behavior for contrast: omitting
+  // diagramText means only `text` is searched, so the same diagram content
+  // produces false MISSING_* findings.
+  const result = runCommonMistakeCheck({
+    problemSlug: 'parking-lot',
+    text: 'Diagram only, see attached class diagram for the design and why it works.',
+    diagram: { nodes: [{ id: 'n1' }, { id: 'n2' }], edges: [{ source: 'n1', target: 'n2' }] },
+  });
+  const missingCodes = result.hints.map((hint) => hint.code);
+  assert.ok(missingCodes.includes('MISSING_VEHICLE'));
+});
+
 test('detects code when several code-like signals are present', () => {
   assert.equal(detectCode('class Ticket { return fee; } const x = () => 1;'), true);
   assert.equal(detectCode('The class should own a ticket and explain why.'), false);

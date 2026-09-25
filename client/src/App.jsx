@@ -81,6 +81,16 @@ export default function App() {
     else navigate('editor', selected.id);
   };
 
+  const rerunEvaluation = async () => {
+    try {
+      await api.rerunEvaluation(attempt.id);
+      const { attempt: latest } = await api.getAttempt(attempt.id);
+      setAttempt(latest);
+      await refreshAttempts();
+      navigate('editor', attempt.id);
+    } catch (e) { setError(e.message); }
+  };
+
   const retry = async () => {
     const { attempt: created } = await api.createAttempt(attempt.problem_id);
     setAttempt(created);
@@ -100,7 +110,7 @@ export default function App() {
       {route.view === 'dashboard' && <Dashboard problems={problems} attempts={attempts} onOpenProblem={openProblem} onOpenHistory={() => navigate('history')} />}
       {route.view === 'history' && <History attempts={attempts} onOpenAttempt={openAttempt} onBrowse={() => navigate('dashboard')} />}
       {route.view === 'editor' && problem && attempt && <Editor problem={problem} initialAttempt={attempt} onBack={() => navigate('dashboard')} onSubmitted={(latest) => { setAttempt(latest); refreshAttempts(); if (latest.status === 'completed') navigate('result', latest.id); }} />}
-      {route.view === 'result' && attempt && <Result attempt={attempt} onBackToProblems={() => navigate('dashboard')} onHistory={() => navigate('history')} onRetry={retry} />}
+      {route.view === 'result' && attempt && <Result attempt={attempt} onBackToProblems={() => navigate('dashboard')} onHistory={() => navigate('history')} onRetry={retry} onRerun={rerunEvaluation} />}
     </div>
   );
 }

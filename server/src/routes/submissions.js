@@ -15,6 +15,14 @@ export function createSubmissionsRouter({ evaluationService }) {
     } catch (error) { next(error); }
   });
 
+  // Re-run a failed evaluation in place, keeping the original submission.
+  router.post('/:attemptId/rerun', async (req, res, next) => {
+    try {
+      await evaluationService.rerunFailedEvaluation(req.params.attemptId);
+      res.status(202).json({ attemptId: req.params.attemptId, status: 'submitted' });
+    } catch (error) { next(error); }
+  });
+
   return router;
 }
 

@@ -36,7 +36,12 @@ export function detectCode(text) {
   return signals.filter((signal) => signal.test(text)).length >= 2;
 }
 
-export function runCommonMistakeCheck({ problemSlug, text = '', diagram = { nodes: [], edges: [] } }) {
+export function runCommonMistakeCheck({
+  problemSlug,
+  text = '',
+  diagram = { nodes: [], edges: [] },
+  diagramText = '',
+}) {
   const input = { text, diagram };
   const hardFailures = [];
   const hints = [];
@@ -54,8 +59,12 @@ export function runCommonMistakeCheck({ problemSlug, text = '', diagram = { node
     hints.push({ code: 'NO_DECISION_RATIONALE', message: 'The submission does not visibly explain why key design decisions were made.' });
   }
 
+  // Class/relationship signals (vehicle, ticket, inventory, ...) can live in the
+  // diagram alone. Search text + serialized diagram together so a diagram-only
+  // submission does not get penalized with false MISSING_* findings.
+  const searchableText = diagramText ? `${text}\n${diagramText}` : text;
   for (const [code, signal, message] of problemSignals[problemSlug] || []) {
-    if (!signal.test(text)) hints.push({ code: `MISSING_${code.toUpperCase()}`, message });
+    if (!signal.test(searchableText)) hints.push({ code: `MISSING_${code.toUpperCase()}`, message });
   }
 
   if ((diagram?.nodes?.length ?? 0) > 0 && (diagram?.edges?.length ?? 0) === 0) {

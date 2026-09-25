@@ -23,6 +23,7 @@ export const api = {
   createAttempt: (problemId) => request('/attempts', { method: 'POST', body: JSON.stringify({ problemId }) }),
   saveDraft: (id, data) => request(`/attempts/${id}/draft`, { method: 'PATCH', body: JSON.stringify(data) }),
   submitAttempt: (id, data) => request(`/submissions/${id}/submit`, { method: 'POST', body: JSON.stringify(data) }),
+  rerunEvaluation: (id) => request(`/submissions/${id}/rerun`, { method: 'POST' }),
 };
 
 export { API_BASE };

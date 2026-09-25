@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import { env } from './config/env.js';
-import { pool } from './db/pool.js';
+import { pool, query, withTransaction } from './db/pool.js';
 import { problemsRouter } from './routes/problems.js';
 import { attemptsRouter } from './routes/attempts.js';
 import { createSubmissionsRouter } from './routes/submissions.js';
@@ -12,7 +12,7 @@ const app = express();
 app.use(cors({ origin: env.clientOrigin, credentials: false }));
 app.use(express.json({ limit: '1mb' }));
 
-const evaluationService = new EvaluationService({ evaluator: new GeminiEvaluator() });
+const evaluationService = new EvaluationService({ evaluator: new GeminiEvaluator(), query, withTransaction });
 
 app.get('/api/health', async (_req, res) => {
   try {
