@@ -1,58 +1,73 @@
-# AI_USAGE.md
+How AI was used
 
-## Role of AI in the product
+I used AI mainly as a second opinion during the harder design decisions, debugging, and code review. I made the final choices based on the assignment requirements and what made sense for a small 2-day prototype.
 
-Gemini is used only for the **deep evaluation** portion of a learner's LLD submission. The application deliberately performs deterministic checks before making an LLM call.
+1. Qualitative rubric instead of a numeric score
 
-## AI-assisted engineering decisions
+One suggestion was to give each rubric criterion a numeric score and calculate progress from it.
 
-### 1. Qualitative rubric instead of a single score
+I rejected the idea of an overall score and used:
 
-**Suggested approach:** represent each criterion as Strong / Adequate / Needs work / Not addressed, with evidence, concern, suggestion, and confidence.
+Strong
 
-**Accepted:** yes.
+Adequate
 
-**Why:** several LLD solutions can be valid, so a numeric total can imply more precision than the evidence supports. Qualitative levels also make the feedback easier to read and act upon.
+Needs work
 
-### 2. Deterministic precheck before Gemini
+Not addressed
 
-**Suggested approach:** catch obvious common mistakes without using an LLM, then provide non-fatal findings to Gemini as hints.
+Each criterion also includes evidence, concern, suggestion, and confidence.
 
-**Accepted:** yes.
+The reason was that LLD problems can have more than one valid design. A single number would make the feedback look more objective and precise than it really is.
 
-**Why:** this reduces avoidable token use and makes a few easy-to-test checks deterministic while leaving broader judgement to the evaluator.
+2. React Flow instead of a text-based diagram format
 
-### 3. Swappable evaluator abstraction
+I considered using Mermaid text for the class diagram because it would have been simpler to store and evaluate.
 
-**Suggested approach:** isolate evaluation behind an evaluator contract instead of putting Gemini calls directly into route handlers.
+I chose React Flow instead because the main point of the diagram is to let the learner actually build relationships between classes on the page. The resulting nodes and edges are then serialized into plain text before evaluation.
 
-**Accepted:** yes.
+This added some implementation work, but it made the submission format more useful for an LLD practice product.
 
-**Why:** it supports future rule-based evaluation and human evaluation, and makes tests independent of an external AI service.
+3. Deterministic precheck, but keep it separate from the submission model
 
-### 4. React Flow for learner diagrams
+The initial idea was to check a few common mistakes before calling Gemini. Non-fatal findings are sent to Gemini as hints, while hard failures stop the evaluation.
 
-**Suggested approach:** use a real node editor and serialize its nodes/edges for the evaluator.
+During implementation, I found a problem with making the precheck directly depend on the submission model: the submission model also uses code-detection logic from the precheck, which would create a circular dependency.
 
-**Accepted:** yes.
+The first fix suggested was to make the checker import the submission model anyway. I rejected that approach.
 
-**Why:** learners can create diagrams visually while the backend still receives a stable, text-friendly representation for evaluation.
+Instead, the caller serializes the diagram using SubmissionContent and passes the resulting text into the precheck. This kept the precheck as a small, testable function without introducing a circular dependency.
 
-### 5. Async evaluation with persisted status
+4. Fixing the evaluation race instead of adding more infrastructure
 
-**Suggested approach:** save the submission first, return immediately, run evaluation in-process, and let the UI poll the database state.
+During review, a concurrency bug was found in the evaluation claim query. A broad FOR UPDATE SKIP LOCKED on the joined query could cause an evaluation to be skipped because another submission was holding a related row lock.
 
-**Accepted:** yes.
+The fix was to scope the lock to the evaluation row:
 
-**Why:** a slow model call should not make the HTTP request look broken, and persisted state makes retries/recovery visible.
+FOR UPDATE OF e SKIP LOCKED
 
-## What AI does not decide
+For tests, a suggestion was to introduce a general in-memory SQL engine capable of parsing arbitrary joins and locking clauses. I rejected that because it was far too much infrastructure for this project.
 
-Gemini does not decide the application flow, schema ownership, identity model, or evaluator architecture at runtime. Those are application-level design decisions.
+I used a small fake database driver that models the specific transaction and row-locking behaviour needed by the evaluation service. The application itself still uses real PostgreSQL.
 
-## Limitations
+5. Preserve submissions when Gemini fails
 
-- LLM evaluation remains probabilistic.
-- The rubric asks for evidence from the actual submission to reduce unsupported claims.
-- The application stores the normalized evaluator output rather than relying on raw model text.
-- Gemini availability/configuration is an external dependency; the UI exposes a Failed state when the evaluator cannot complete.
+The original flow already saved the submission before starting background evaluation. During testing, it became clear that a failed Gemini call should not force the learner to recreate the same work.
+
+I added a rerun path:
+
+Failed → Pending → Evaluating → Completed / Failed
+
+The existing submission is kept and only the evaluation is reset. This also fits the assignment's requirement to handle slow or failed evaluation without turning the prototype into a distributed system.
+
+What AI does not decide
+
+The product scope, final technology choices, learner identity model, database ownership, and overall application structure are application decisions. Gemini is used at runtime to provide structured feedback on learner submissions; it does not decide how the platform itself is designed.
+
+Limitations
+
+LLM feedback is probabilistic, so the rubric is based on evidence rather than a single absolute score.
+
+The deterministic checks intentionally cover only a small set of common mistakes.
+
+Gemini availability and response time are external dependencies.
